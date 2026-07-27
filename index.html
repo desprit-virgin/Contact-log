@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>Contact Log</title>
+<style>
+  :root {
+    --ink: #1c2b24; --paper: #f6f4ee; --line: #d8d3c4;
+    --moss: #3f5c4a; --moss-dark: #2c4234; --clay: #b5654a; --muted: #7d8a80;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  header { padding: 24px 20px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; }
+  header h1 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
+  #backBtn { display: none; background: none; border: none; color: var(--moss-dark); font-size: 14px; font-weight: 600; cursor: pointer; padding: 0; }
+
+  main { max-width: 560px; margin: 0 auto; padding: 18px 16px 60px; }
+
+  .section-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 22px 2px 10px; }
+  .section-label:first-child { margin-top: 0; }
+
+  .card { background: white; border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-bottom: 14px; }
+  .card input, .card textarea {
+    width: 100%; padding: 11px 13px; font-size: 16px; border: 1px solid var(--line);
+    border-radius: 10px; margin-bottom: 10px; background: var(--paper); color: var(--ink); font-family: inherit;
+  }
+  .card textarea { resize: vertical; min-height: 60px; }
+  .card input:focus, .card textarea:focus { outline: 2px solid var(--moss); outline-offset: 1px; }
+  .card label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 5px; }
+
+  button.primary {
+    width: 100%; padding: 13px; font-size: 15px; font-weight: 600;
+    background: var(--moss); color: white; border: none; border-radius: 10px; cursor: pointer;
+  }
+  button.primary:active { background: var(--moss-dark); }
+  button.primary:disabled { background: var(--muted); }
+  .status-msg { font-size: 13px; margin-top: 8px; color: var(--moss-dark); min-height: 16px; }
+
+  .contact-item {
+    display: flex; justify-content: space-between; align-items: center;
+    border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 10px;
+    background: white; cursor: pointer;
+  }
+  .contact-item .name { font-weight: 600; font-size: 15px; }
+  .contact-item .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .contact-item .chevron { color: var(--muted); font-size: 18px; }
+
+  .action-row { display: flex; gap: 8px; margin-bottom: 20px; }
+  .action-row button {
+    flex: 1; padding: 12px; font-size: 14px; font-weight: 600; border-radius: 10px;
+    border: 1px solid var(--line); background: white; color: var(--moss-dark); cursor: pointer;
+  }
+  .action-row button.active { background: var(--moss); color: white; border-color: var(--moss); }
+
+  .timeline-item { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; background: white; }
+  .timeline-item .row1 { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+  .timeline-item .kind { font-weight: 600; font-size: 13px; }
+  .timeline-item .kind.call::before { content: "📞 "; }
+  .timeline-item .kind.sms::before { content: "💬 "; }
+  .timeline-item .kind.email::before { content: "✉️ "; }
+  .timeline-item .time { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .timeline-item .body-text { font-size: 13.5px; line-height: 1.5; margin-top: 8px; }
+  .timeline-item .transcript { margin-top: 8px; font-size: 13.5px; line-height: 1.5; background: var(--paper); border-radius: 8px; padding: 10px 12px; border-left: 3px solid var(--moss); }
+  .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 100px; margin-top: 8px; font-weight: 600; background: #e6ede8; color: var(--moss-dark); }
+  .badge.calling, .badge.transcribing { background: #fbeee7; color: var(--clay); }
+
+  .empty { text-align: center; color: var(--muted); font-size: 13px; padding: 40px 0; }
+</style>
+</head>
+<body>
+
+<header>
+  <button id="backBtn">&larr; Contacts</button>
+  <h1 id="pageTitle">Contact Log</h1>
+  <span></span>
+</header>
+
+<main>
+  <!-- ==== CONTACTS LIST VIEW ==== -->
+  <div id="contactsView">
+    <p class="section-label">Add a contact</p>
+    <div class="card">
+      <label for="newName">Name</label>
+      <input id="newName" type="text" placeholder="Hamish" />
+      <label for="newPhone">Phone</label>
+      <input id="newPhone" type="tel" placeholder="+64 21 123 4567" />
+      <label for="newEmail">Email</label>
+      <input id="newEmail" type="email" placeholder="hamish@example.com" />
+      <button class="primary" id="addContactBtn">Add contact</button>
+      <div class="status-msg" id="addStatus"></div>
+    </div>
+
+    <p class="section-label">Contacts</p>
+    <div class="card" style="padding: 12px 16px;">
+      <label for="importFile" style="margin-bottom:6px;">Bulk import</label>
+      <input id="importFile" type="file" accept="application/json" style="margin-bottom:0;" />
+      <button class="primary" id="importBtn" style="margin-top:10px;">Import contacts from file</button>
+      <div class="status-msg" id="importStatus"></div>
+    </div>
+    <div id="contactList"></div>
+  </div>
+
+  <!-- ==== CONTACT FOLDER VIEW ==== -->
+  <div id="folderView" style="display:none;">
+    <div class="action-row">
+      <button id="tabCall" class="active">Call</button>
+      <button id="tabText">Text</button>
+      <button id="tabEmail">Email</button>
+    </div>
+
+    <div class="card" id="callPane">
+      <button class="primary" id="callBtn">Call &amp; record</button>
+      <div class="status-msg" id="callStatus"></div>
+    </div>
+
+    <div class="card" id="textPane" style="display:none;">
+      <label for="smsBody">Message</label>
+      <textarea id="smsBody" placeholder="Type your text…"></textarea>
+      <button class="primary" id="smsBtn">Send text</button>
+      <div class="status-msg" id="smsStatus"></div>
+    </div>
+
+    <div class="card" id="emailPane" style="display:none;">
+      <label for="emailSubject">Subject</label>
+      <input id="emailSubject" type="text" placeholder="Subject" />
+      <label for="emailBody">Message</label>
+      <textarea id="emailBody" placeholder="Type your email…"></textarea>
+      <button class="primary" id="emailBtn">Send email</button>
+      <div class="status-msg" id="emailStatus"></div>
+    </div>
+
+    <p class="section-label">History</p>
+    <div id="timeline"></div>
+  </div>
+</main>
+
+<script>
+let currentContact = null;
+
+const contactsView = document.getElementById('contactsView');
+const folderView = document.getElementById('folderView');
+const backBtn = document.getElementById('backBtn');
+const pageTitle = document.getElementById('pageTitle');
+
+backBtn.addEventListener('click', showContactsView);
+
+function showContactsView() {
+  currentContact = null;
+  contactsView.style.display = 'block';
+  folderView.style.display = 'none';
+  backBtn.style.display = 'none';
+  pageTitle.textContent = 'Contact Log';
+  loadContacts();
+}
+
+function showFolderView(contact) {
+  currentContact = contact;
+  contactsView.style.display = 'none';
+  folderView.style.display = 'block';
+  backBtn.style.display = 'block';
+  pageTitle.textContent = contact.name;
+  loadFolder();
+}
+
+// ---- Contacts ----
+document.getElementById('addContactBtn').addEventListener('click', async () => {
+  const name = document.getElementById('newName').value.trim();
+  const phone = document.getElementById('newPhone').value.trim();
+  const email = document.getElementById('newEmail').value.trim();
+  const status = document.getElementById('addStatus');
+  if (!name) { status.textContent = 'Name is required.'; return; }
+
+  const res = await fetch('/api/contacts', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, phone, email }),
+  });
+  if (res.ok) {
+    document.getElementById('newName').value = '';
+    document.getElementById('newPhone').value = '';
+    document.getElementById('newEmail').value = '';
+    status.textContent = '';
+    loadContacts();
+  } else {
+    status.textContent = 'Could not add contact.';
+  }
+});
+
+document.getElementById('importBtn').addEventListener('click', async () => {
+  const fileInput = document.getElementById('importFile');
+  const status = document.getElementById('importStatus');
+  if (!fileInput.files.length) { status.textContent = 'Choose a file first.'; return; }
+
+  try {
+    const text = await fileInput.files[0].text();
+    const data = JSON.parse(text);
+    const res = await fetch('/api/contacts/import', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    const result = await res.json();
+    status.textContent = res.ok ? `Added ${result.added}, skipped ${result.skipped} duplicates.` : 'Error: ' + result.error;
+    loadContacts();
+  } catch (err) {
+    status.textContent = 'Could not read file: ' + err.message;
+  }
+});
+
+async function loadContacts() {
+  const res = await fetch('/api/contacts');
+  const contacts = await res.json();
+  const list = document.getElementById('contactList');
+
+  if (!contacts.length) {
+    list.innerHTML = '<div class="empty">No contacts yet — add one above.</div>';
+    return;
+  }
+
+  list.innerHTML = contacts.map(c => `
+    <div class="contact-item" onclick='showFolderView(${JSON.stringify(c)})'>
+      <div>
+        <div class="name">${c.name}</div>
+        <div class="sub">${[c.location, c.phone, c.email].filter(Boolean).join(' · ')}</div>
+      </div>
+      <div class="chevron">›</div>
+    </div>
+  `).join('');
+}
+
+// ---- Tabs ----
+const tabs = { call: 'tabCall', text: 'tabText', email: 'tabEmail' };
+const panes = { call: 'callPane', text: 'textPane', email: 'emailPane' };
+function setTab(active) {
+  Object.keys(tabs).forEach(k => {
+    document.getElementById(tabs[k]).classList.toggle('active', k === active);
+    document.getElementById(panes[k]).style.display = k === active ? 'block' : 'none';
+  });
+}
+document.getElementById('tabCall').addEventListener('click', () => setTab('call'));
+document.getElementById('tabText').addEventListener('click', () => setTab('text'));
+document.getElementById('tabEmail').addEventListener('click', () => setTab('email'));
+
+// ---- Call ----
+document.getElementById('callBtn').addEventListener('click', async () => {
+  const status = document.getElementById('callStatus');
+  if (!currentContact.phone) { status.textContent = 'This contact has no phone number.'; return; }
+  status.textContent = 'Calling your phone — answer to bridge the call…';
+  const res = await fetch('/api/call', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to: currentContact.phone, label: currentContact.name }),
+  });
+  const data = await res.json();
+  status.textContent = res.ok ? 'Call started.' : 'Error: ' + data.error;
+  loadFolder();
+});
+
+// ---- Text ----
+document.getElementById('smsBtn').addEventListener('click', async () => {
+  const status = document.getElementById('smsStatus');
+  const body = document.getElementById('smsBody').value.trim();
+  if (!currentContact.phone) { status.textContent = 'This contact has no phone number.'; return; }
+  if (!body) { status.textContent = 'Write a message first.'; return; }
+
+  const res = await fetch('/api/sms/send', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to: currentContact.phone, body, contactId: currentContact.id }),
+  });
+  const data = await res.json();
+  status.textContent = res.ok ? 'Sent.' : 'Error: ' + data.error;
+  if (res.ok) document.getElementById('smsBody').value = '';
+  loadFolder();
+});
+
+// ---- Email ----
+document.getElementById('emailBtn').addEventListener('click', async () => {
+  const status = document.getElementById('emailStatus');
+  const subject = document.getElementById('emailSubject').value.trim();
+  const body = document.getElementById('emailBody').value.trim();
+  if (!currentContact.email) { status.textContent = 'This contact has no email address.'; return; }
+  if (!body) { status.textContent = 'Write a message first.'; return; }
+
+  const res = await fetch('/api/email/send', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to: currentContact.email, subject, body, contactId: currentContact.id }),
+  });
+  const data = await res.json();
+  status.textContent = res.ok ? 'Sent.' : 'Error: ' + data.error;
+  if (res.ok) { document.getElementById('emailSubject').value = ''; document.getElementById('emailBody').value = ''; }
+  loadFolder();
+});
+
+// ---- Folder timeline ----
+async function loadFolder() {
+  await fetch('/api/email/sync', { method: 'POST' }).catch(() => {}); // best-effort inbox sync
+  const res = await fetch('/api/contacts/' + currentContact.id + '/folder');
+  const data = await res.json();
+  const el = document.getElementById('timeline');
+
+  if (!data.timeline.length) {
+    el.innerHTML = '<div class="empty">Nothing here yet.</div>';
+    return;
+  }
+
+  el.innerHTML = data.timeline.map(item => {
+    const time = new Date(item.at).toLocaleString('en-NZ', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+    let body = '';
+    if (item.type === 'call') {
+      body = item.transcript
+        ? `<div class="transcript">${item.transcript}</div>`
+        : `<span class="badge ${item.status}">${item.status}</span>`;
+    } else if (item.type === 'sms') {
+      body = `<div class="body-text">${item.direction === 'inbound' ? '←' : '→'} ${item.body}</div>`;
+    } else if (item.type === 'email') {
+      body = `<div class="body-text"><strong>${item.subject || '(no subject)'}</strong><br>${item.body || ''}</div>`;
+    }
+    return `
+      <div class="timeline-item">
+        <div class="row1">
+          <span class="kind ${item.type}">${item.type === 'call' ? 'Call' : item.type === 'sms' ? 'Text' : 'Email'}</span>
+          <span class="time">${time}</span>
+        </div>
+        ${body}
+      </div>
+    `;
+  }).join('');
+}
+
+showContactsView();
+</script>
+
+</body>
+</html>

@@ -1,0 +1,17 @@
+{
+  "name": "call-record-transcribe",
+  "version": "1.0.0",
+  "description": "Personal call recording + transcription app built on Twilio",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@azure/msal-node": "^2.9.2",
+    "@microsoft/microsoft-graph-client": "^3.0.7",
+    "body-parser": "^1.20.2",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "twilio": "^5.0.4"
+  }
+}
