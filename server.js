@@ -131,9 +131,21 @@ app.get('/api/contacts/:id/folder', (req, res) => {
 // ---- 1. Kick off a call ----
 // Twilio calls YOUR phone first. When you pick up, it dials the target number
 // and bridges the two legs together — recording starts automatically.
+// Normalize a loosely-formatted NZ number (e.g. "027 333 3351") into
+// international format Twilio requires (e.g. "+64273333351").
+function toE164NZ(raw) {
+  if (!raw) return raw;
+  let digits = raw.replace(/[^\d+]/g, '');
+  if (digits.startsWith('+')) return digits; // already international
+  if (digits.startsWith('0')) digits = digits.slice(1); // drop leading 0
+  if (digits.startsWith('64')) return '+' + digits;
+  return '+64' + digits;
+}
+
 app.post('/api/call', async (req, res) => {
-  const { to, label } = req.body;
-  if (!to) return res.status(400).json({ error: 'Missing "to" number' });
+  const { to: rawTo, label } = req.body;
+  if (!rawTo) return res.status(400).json({ error: 'Missing "to" number' });
+  const to = toE164NZ(rawTo);
 
   try {
     const call = await client.calls.create({
@@ -268,8 +280,9 @@ app.post('/api/calls/:sid/refresh', async (req, res) => {
 
 // ---- Send a text ----
 app.post('/api/sms/send', async (req, res) => {
-  const { to, body, contactId } = req.body;
-  if (!to || !body) return res.status(400).json({ error: 'Missing "to" or "body"' });
+  const { to: rawTo, body, contactId } = req.body;
+  if (!rawTo || !body) return res.status(400).json({ error: 'Missing "to" or "body"' });
+  const to = toE164NZ(rawTo);
 
   try {
     const msg = await client.messages.create({ to, from: TWILIO_PHONE_NUMBER, body });
