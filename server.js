@@ -323,28 +323,43 @@ app.get('/api/sms', (req, res) => res.json(loadMessages()));
 const msal = require('@azure/msal-node');
 const { Client } = require('@microsoft/microsoft-graph-client');
 
-const msalConfig = {
-  auth: {
-    clientId: process.env.MS_CLIENT_ID,
-    authority: `https://login.microsoftonline.com/${process.env.MS_TENANT_ID || 'common'}`,
-    clientSecret: process.env.MS_CLIENT_SECRET,
-  },
-};
-const msalClient = new msal.ConfidentialClientApplication(msalConfig);
 const MS_SCOPES = ['Mail.Read', 'Mail.Send', 'offline_access', 'User.Read'];
 const TOKEN_PATH = path.join(__dirname, 'ms-token.json');
 
+// Built lazily — only when an email route is actually hit — so the app can run
+// fine with just Twilio configured, before Outlook is set up.
+let msalClient = null;
+function getMsalClient() {
+  if (!process.env.MS_CLIENT_ID || !process.env.MS_CLIENT_SECRET) {
+    throw new Error('Microsoft 365 is not configured yet — add MS_CLIENT_ID and MS_CLIENT_SECRET to enable email.');
+  }
+  if (!msalClient) {
+    msalClient = new msal.ConfidentialClientApplication({
+      auth: {
+        clientId: process.env.MS_CLIENT_ID,
+        authority: `https://login.microsoftonline.com/${process.env.MS_TENANT_ID || 'common'}`,
+        clientSecret: process.env.MS_CLIENT_SECRET,
+      },
+    });
+  }
+  return msalClient;
+}
+
 app.get('/auth/microsoft', async (req, res) => {
-  const url = await msalClient.getAuthCodeUrl({
-    scopes: MS_SCOPES,
-    redirectUri: `${PUBLIC_BASE_URL}/auth/microsoft/callback`,
-  });
-  res.redirect(url);
+  try {
+    const url = await getMsalClient().getAuthCodeUrl({
+      scopes: MS_SCOPES,
+      redirectUri: `${PUBLIC_BASE_URL}/auth/microsoft/callback`,
+    });
+    res.redirect(url);
+  } catch (err) {
+    res.status(500).send(err.message);
+  }
 });
 
 app.get('/auth/microsoft/callback', async (req, res) => {
   try {
-    const tokenResponse = await msalClient.acquireTokenByCode({
+    const tokenResponse = await getMsalClient().acquireTokenByCode({
       code: req.query.code,
       scopes: MS_SCOPES,
       redirectUri: `${PUBLIC_BASE_URL}/auth/microsoft/callback`,
@@ -360,7 +375,7 @@ async function getGraphClient() {
   const cached = loadJSON(TOKEN_PATH);
   if (!cached || !cached.account) throw new Error('Not connected to Microsoft 365 — visit /auth/microsoft first');
 
-  const result = await msalClient.acquireTokenSilent({
+  const result = await getMsalClient().acquireTokenSilent({
     account: cached.account,
     scopes: MS_SCOPES,
   });
