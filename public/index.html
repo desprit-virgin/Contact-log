@@ -69,6 +69,11 @@
   .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 100px; margin-top: 8px; font-weight: 600; background: #e6ede8; color: var(--moss-dark); }
   .badge.calling, .badge.transcribing { background: #fbeee7; color: var(--clay); }
 
+  .refresh-link {
+    font-size: 12px; color: var(--moss-dark); background: none; border: none;
+    padding: 0; margin-top: 8px; margin-left: 6px; cursor: pointer; text-decoration: underline;
+  }
+
   .empty { text-align: center; color: var(--muted); font-size: 13px; padding: 40px 0; }
 </style>
 </head>
@@ -102,6 +107,29 @@
       <button class="primary" id="importBtn" style="margin-top:10px;">Import contacts from file</button>
       <div class="status-msg" id="importStatus"></div>
     </div>
+
+    <p class="section-label">Send to everyone</p>
+    <div class="action-row">
+      <button id="massTextTab" class="active">Text all</button>
+      <button id="massEmailTab">Email all</button>
+    </div>
+
+    <div class="card" id="massTextPane">
+      <label for="massTextBody">Message (sent to every contact with a phone number)</label>
+      <textarea id="massTextBody" placeholder="Type your text…"></textarea>
+      <button class="primary" id="massTextBtn">Send to all</button>
+      <div class="status-msg" id="massTextStatus"></div>
+    </div>
+
+    <div class="card" id="massEmailPane" style="display:none;">
+      <label for="massEmailSubject">Subject</label>
+      <input id="massEmailSubject" type="text" placeholder="Subject" />
+      <label for="massEmailBody">Message (sent to every contact with an email address)</label>
+      <textarea id="massEmailBody" placeholder="Type your email…"></textarea>
+      <button class="primary" id="massEmailBtn">Send to all</button>
+      <div class="status-msg" id="massEmailStatus"></div>
+    </div>
+
     <div id="contactList"></div>
   </div>
 
@@ -187,6 +215,61 @@ document.getElementById('addContactBtn').addEventListener('click', async () => {
     loadContacts();
   } else {
     status.textContent = 'Could not add contact.';
+  }
+});
+
+document.getElementById('massTextTab').addEventListener('click', () => {
+  document.getElementById('massTextTab').classList.add('active');
+  document.getElementById('massEmailTab').classList.remove('active');
+  document.getElementById('massTextPane').style.display = 'block';
+  document.getElementById('massEmailPane').style.display = 'none';
+});
+document.getElementById('massEmailTab').addEventListener('click', () => {
+  document.getElementById('massEmailTab').classList.add('active');
+  document.getElementById('massTextTab').classList.remove('active');
+  document.getElementById('massEmailPane').style.display = 'block';
+  document.getElementById('massTextPane').style.display = 'none';
+});
+
+document.getElementById('massTextBtn').addEventListener('click', async () => {
+  const status = document.getElementById('massTextStatus');
+  const body = document.getElementById('massTextBody').value.trim();
+  if (!body) { status.textContent = 'Write a message first.'; return; }
+  if (!confirm('Send this text to every contact with a phone number?')) return;
+
+  status.textContent = 'Sending…';
+  const res = await fetch('/api/sms/broadcast', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ body }),
+  });
+  const data = await res.json();
+  if (res.ok) {
+    status.textContent = `Sent to ${data.sent} contacts` + (data.failed.length ? `, ${data.failed.length} failed.` : '.');
+    document.getElementById('massTextBody').value = '';
+  } else {
+    status.textContent = 'Error: ' + data.error;
+  }
+});
+
+document.getElementById('massEmailBtn').addEventListener('click', async () => {
+  const status = document.getElementById('massEmailStatus');
+  const subject = document.getElementById('massEmailSubject').value.trim();
+  const body = document.getElementById('massEmailBody').value.trim();
+  if (!body) { status.textContent = 'Write a message first.'; return; }
+  if (!confirm('Send this email to every contact with an email address?')) return;
+
+  status.textContent = 'Sending…';
+  const res = await fetch('/api/email/broadcast', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ subject, body }),
+  });
+  const data = await res.json();
+  if (res.ok) {
+    status.textContent = `Sent to ${data.sent} contacts` + (data.failed.length ? `, ${data.failed.length} failed.` : '.');
+    document.getElementById('massEmailSubject').value = '';
+    document.getElementById('massEmailBody').value = '';
+  } else {
+    status.textContent = 'Error: ' + data.error;
   }
 });
 
@@ -294,6 +377,11 @@ document.getElementById('emailBtn').addEventListener('click', async () => {
 });
 
 // ---- Folder timeline ----
+async function refreshCall(sid) {
+  await fetch('/api/calls/' + sid + '/refresh', { method: 'POST' });
+  loadFolder();
+}
+
 async function loadFolder() {
   await fetch('/api/email/sync', { method: 'POST' }).catch(() => {}); // best-effort inbox sync
   const res = await fetch('/api/contacts/' + currentContact.id + '/folder');
@@ -311,7 +399,7 @@ async function loadFolder() {
     if (item.type === 'call') {
       body = item.transcript
         ? `<div class="transcript">${item.transcript}</div>`
-        : `<span class="badge ${item.status}">${item.status}</span>`;
+        : `<span class="badge ${item.status}">${item.status}</span> <button class="refresh-link" onclick="refreshCall('${item.sid}')">Check for transcript</button>`;
     } else if (item.type === 'sms') {
       body = `<div class="body-text">${item.direction === 'inbound' ? '←' : '→'} ${item.body}</div>`;
     } else if (item.type === 'email') {
