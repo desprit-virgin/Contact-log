@@ -69,6 +69,10 @@
   .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 100px; margin-top: 8px; font-weight: 600; background: #e6ede8; color: var(--moss-dark); }
   .badge.calling, .badge.transcribing { background: #fbeee7; color: var(--clay); }
 
+  .item-select { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .item-select input[type="checkbox"] { width: 16px; height: 16px; }
+  .copy-bar { display: flex; align-items: center; margin-bottom: 14px; }
+
   .refresh-link {
     font-size: 12px; color: var(--moss-dark); background: none; border: none;
     padding: 0; margin-top: 8px; margin-left: 6px; cursor: pointer; text-decoration: underline;
@@ -382,18 +386,61 @@ async function refreshCall(sid) {
   loadFolder();
 }
 
+function plainTextFor(item) {
+  const time = new Date(item.at).toLocaleString('en-NZ', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  if (item.type === 'call') {
+    return `[Call — ${time}]\n${item.transcript || '(no transcript)'}`;
+  } else if (item.type === 'sms') {
+    return `[Text — ${time}, ${item.direction === 'inbound' ? 'received' : 'sent'}]\n${item.body}`;
+  } else {
+    return `[Email — ${time}, ${item.direction === 'inbound' ? 'received' : 'sent'}]\nSubject: ${item.subject || '(no subject)'}\n${item.body || ''}`;
+  }
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (err) {
+    // Fallback for contexts where the Clipboard API is blocked
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  }
+}
+
+let timelineItems = [];
+
+function copyOne(index) {
+  copyText(plainTextFor(timelineItems[index]));
+  const btn = document.getElementById('copyBtn' + index);
+  if (btn) { const orig = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => btn.textContent = orig, 1200); }
+}
+
+function copySelected() {
+  const checked = [...document.querySelectorAll('.item-check:checked')].map(c => parseInt(c.dataset.index));
+  if (!checked.length) return;
+  const text = checked.sort((a, b) => a - b).map(i => plainTextFor(timelineItems[i])).join('\n\n---\n\n');
+  copyText(text);
+  const status = document.getElementById('copySelectedStatus');
+  if (status) { status.textContent = `Copied ${checked.length} item(s).`; setTimeout(() => status.textContent = '', 2000); }
+}
+
 async function loadFolder() {
   await fetch('/api/email/sync', { method: 'POST' }).catch(() => {}); // best-effort inbox sync
   const res = await fetch('/api/contacts/' + currentContact.id + '/folder');
   const data = await res.json();
   const el = document.getElementById('timeline');
+  timelineItems = data.timeline;
 
   if (!data.timeline.length) {
     el.innerHTML = '<div class="empty">Nothing here yet.</div>';
     return;
   }
 
-  el.innerHTML = data.timeline.map(item => {
+  const rows = data.timeline.map((item, index) => {
     const time = new Date(item.at).toLocaleString('en-NZ', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
     let body = '';
     if (item.type === 'call') {
@@ -408,13 +455,25 @@ async function loadFolder() {
     return `
       <div class="timeline-item">
         <div class="row1">
-          <span class="kind ${item.type}">${item.type === 'call' ? 'Call' : item.type === 'sms' ? 'Text' : 'Email'}</span>
+          <label class="item-select">
+            <input type="checkbox" class="item-check" data-index="${index}" />
+            <span class="kind ${item.type}">${item.type === 'call' ? 'Call' : item.type === 'sms' ? 'Text' : 'Email'}</span>
+          </label>
           <span class="time">${time}</span>
         </div>
         ${body}
+        <button class="refresh-link" id="copyBtn${index}" onclick="copyOne(${index})">Copy</button>
       </div>
     `;
   }).join('');
+
+  el.innerHTML = `
+    <div class="copy-bar">
+      <button class="primary" style="width:auto; padding:8px 16px; font-size:13px;" onclick="copySelected()">Copy selected</button>
+      <span class="status-msg" id="copySelectedStatus" style="margin:0 0 0 10px;"></span>
+    </div>
+    ${rows}
+  `;
 }
 
 showContactsView();
