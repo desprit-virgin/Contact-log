@@ -1,10 +1,11 @@
 // Call + Record + Transcribe app — single user
-// Built on Twilio Voice + Twilio's built-in transcription (no extra API keys needed)
+// Built on Twilio Voice + Twilio's built-in transcription
+// Storage: Upstash Redis (free tier) — plain files don't survive restarts on Render's
+// free plan, so all data lives in a small free cloud database instead.
 
 const express = require('express');
 const bodyParser = require('body-parser');
 const twilio = require('twilio');
-const fs = require('fs');
 const path = require('path');
 
 require('dotenv').config();
@@ -14,7 +15,9 @@ const {
   TWILIO_AUTH_TOKEN,
   TWILIO_PHONE_NUMBER, // the Twilio number that will do the calling
   MY_PHONE_NUMBER,     // your real mobile number — Twilio calls you first, then bridges
-  PUBLIC_BASE_URL,     // e.g. https://your-app.ngrok.io or your deployed URL
+  PUBLIC_BASE_URL,     // e.g. https://your-app.onrender.com
+  UPSTASH_REDIS_REST_URL,
+  UPSTASH_REDIS_REST_TOKEN,
   PORT = 3000,
 } = process.env;
 
@@ -27,105 +30,136 @@ app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ---- Flat-file "database" — fine for single-user use ----
-const DB_PATH = path.join(__dirname, 'calls.json');
-const CONTACTS_PATH = path.join(__dirname, 'contacts.json');
-const MESSAGES_PATH = path.join(__dirname, 'messages.json');
-const EMAILS_PATH = path.join(__dirname, 'emails.json');
+// ==================== STORAGE (Upstash Redis) ====================
+// Each "table" is stored as one JSON string under a single key.
+// Small-scale (hundreds of records) so this is simple and plenty fast.
 
-function loadJSON(p) {
-  if (!fs.existsSync(p)) return [];
-  return JSON.parse(fs.readFileSync(p, 'utf8'));
+async function redis(command) {
+  if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) {
+    throw new Error('Storage is not configured — add UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN.');
+  }
+  const res = await fetch(`${UPSTASH_REDIS_REST_URL}/${command.map(encodeURIComponent).join('/')}`, {
+    headers: { Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}` },
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  return data.result;
 }
-function saveJSON(p, data) {
-  fs.writeFileSync(p, JSON.stringify(data, null, 2));
+
+async function loadTable(name) {
+  const raw = await redis(['GET', name]);
+  return raw ? JSON.parse(raw) : [];
 }
-const loadCalls = () => loadJSON(DB_PATH);
-const saveCalls = (d) => saveJSON(DB_PATH, d);
-const loadContacts = () => loadJSON(CONTACTS_PATH);
-const saveContacts = (d) => saveJSON(CONTACTS_PATH, d);
-const loadMessages = () => loadJSON(MESSAGES_PATH);
-const saveMessages = (d) => saveJSON(MESSAGES_PATH, d);
-const loadEmails = () => loadJSON(EMAILS_PATH);
-const saveEmails = (d) => saveJSON(EMAILS_PATH, d);
+async function saveTable(name, data) {
+  await redis(['SET', name, JSON.stringify(data)]);
+}
+
+const loadCalls = () => loadTable('calls');
+const saveCalls = (d) => saveTable('calls', d);
+const loadContacts = () => loadTable('contacts');
+const saveContacts = (d) => saveTable('contacts', d);
+const loadMessages = () => loadTable('messages');
+const saveMessages = (d) => saveTable('messages', d);
+const loadEmails = () => loadTable('emails');
+const saveEmails = (d) => saveTable('emails', d);
+const loadMsToken = () => loadTable('ms-token').then((t) => (Array.isArray(t) && t.length === 0 ? null : t));
+const saveMsToken = (d) => saveTable('ms-token', d);
 
 // Match a phone/email to a saved contact, normalizing loosely
-function findContactByPhone(phone) {
+async function findContactByPhone(phone) {
   if (!phone) return null;
   const digits = phone.replace(/\D/g, '').slice(-9); // last 9 digits, NZ-safe
-  return loadContacts().find((c) => c.phone && c.phone.replace(/\D/g, '').slice(-9) === digits) || null;
+  const contacts = await loadContacts();
+  return contacts.find((c) => c.phone && c.phone.replace(/\D/g, '').slice(-9) === digits) || null;
 }
-function findContactByEmail(email) {
+async function findContactByEmail(email) {
   if (!email) return null;
   const norm = email.toLowerCase().trim();
-  return loadContacts().find((c) => c.email && c.email.toLowerCase().trim() === norm) || null;
+  const contacts = await loadContacts();
+  return contacts.find((c) => c.email && c.email.toLowerCase().trim() === norm) || null;
 }
 
 // ---- Contacts CRUD ----
-app.get('/api/contacts', (req, res) => res.json(loadContacts()));
-
-app.post('/api/contacts', (req, res) => {
-  const { name, phone, email } = req.body;
-  if (!name) return res.status(400).json({ error: 'Name is required' });
-  const contacts = loadContacts();
-  const contact = { id: 'c_' + Date.now(), name, phone: phone || '', email: email || '' };
-  contacts.unshift(contact);
-  saveContacts(contacts);
-  res.json(contact);
+app.get('/api/contacts', async (req, res) => {
+  try { res.json(await loadContacts()); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.delete('/api/contacts/:id', (req, res) => {
-  const contacts = loadContacts().filter((c) => c.id !== req.params.id);
-  saveContacts(contacts);
-  res.json({ ok: true });
+app.post('/api/contacts', async (req, res) => {
+  const { name, phone, email } = req.body;
+  if (!name) return res.status(400).json({ error: 'Name is required' });
+  try {
+    const contacts = await loadContacts();
+    const contact = { id: 'c_' + Date.now(), name, phone: phone || '', email: email || '' };
+    contacts.unshift(contact);
+    await saveContacts(contacts);
+    res.json(contact);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/contacts/:id', async (req, res) => {
+  try {
+    const contacts = (await loadContacts()).filter((c) => c.id !== req.params.id);
+    await saveContacts(contacts);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ---- Bulk import contacts (e.g. from a franchise list) ----
-// Body: { contacts: [{ name, phone, email, location }] }
-// Skips any row that matches an existing contact by phone or email.
-app.post('/api/contacts/import', (req, res) => {
+app.post('/api/contacts/import', async (req, res) => {
   const incoming = req.body.contacts || [];
-  const contacts = loadContacts();
-  let added = 0, skipped = 0;
+  try {
+    const contacts = await loadContacts();
+    let added = 0, skipped = 0;
 
-  for (const row of incoming) {
-    if (!row.name) { skipped++; continue; }
-    const dupe = contacts.find(
-      (c) => (row.phone && c.phone && c.phone.replace(/\D/g, '') === row.phone.replace(/\D/g, '')) ||
-             (row.email && c.email && c.email.toLowerCase() === row.email.toLowerCase())
-    );
-    if (dupe) { skipped++; continue; }
+    for (const row of incoming) {
+      if (!row.name) { skipped++; continue; }
+      const dupe = contacts.find(
+        (c) => (row.phone && c.phone && c.phone.replace(/\D/g, '') === row.phone.replace(/\D/g, '')) ||
+               (row.email && c.email && c.email.toLowerCase() === row.email.toLowerCase())
+      );
+      if (dupe) { skipped++; continue; }
 
-    contacts.push({
-      id: 'c_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
-      name: row.name,
-      phone: row.phone || '',
-      email: row.email || '',
-      location: row.location || '',
-    });
-    added++;
+      contacts.push({
+        id: 'c_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+        name: row.name,
+        phone: row.phone || '',
+        email: row.email || '',
+        location: row.location || '',
+      });
+      added++;
+    }
+
+    await saveContacts(contacts);
+    res.json({ ok: true, added, skipped });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  saveContacts(contacts);
-  res.json({ ok: true, added, skipped });
 });
 
 // ---- Unified folder view: everything for one contact ----
-app.get('/api/contacts/:id/folder', (req, res) => {
-  const contact = loadContacts().find((c) => c.id === req.params.id);
-  if (!contact) return res.status(404).json({ error: 'not found' });
+app.get('/api/contacts/:id/folder', async (req, res) => {
+  try {
+    const contact = (await loadContacts()).find((c) => c.id === req.params.id);
+    if (!contact) return res.status(404).json({ error: 'not found' });
 
-  const calls = loadCalls().filter((c) => c.contactId === contact.id);
-  const messages = loadMessages().filter((m) => m.contactId === contact.id);
-  const emails = loadEmails().filter((e) => e.contactId === contact.id);
+    const calls = (await loadCalls()).filter((c) => c.contactId === contact.id);
+    const messages = (await loadMessages()).filter((m) => m.contactId === contact.id);
+    const emails = (await loadEmails()).filter((e) => e.contactId === contact.id);
 
-  const timeline = [
-    ...calls.map((c) => ({ type: 'call', at: c.startedAt, ...c })),
-    ...messages.map((m) => ({ type: 'sms', at: m.at, ...m })),
-    ...emails.map((e) => ({ type: 'email', at: e.at, ...e })),
-  ].sort((a, b) => new Date(b.at) - new Date(a.at));
+    const timeline = [
+      ...calls.map((c) => ({ type: 'call', at: c.startedAt, ...c })),
+      ...messages.map((m) => ({ type: 'sms', at: m.at, ...m })),
+      ...emails.map((e) => ({ type: 'email', at: e.at, ...e })),
+    ].sort((a, b) => new Date(b.at) - new Date(a.at));
 
-  res.json({ contact, timeline });
+    res.json({ contact, timeline });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ---- 1. Kick off a call ----
@@ -157,8 +191,8 @@ app.post('/api/call', async (req, res) => {
       statusCallbackEvent: ['completed'],
     });
 
-    const contact = findContactByPhone(to);
-    const calls = loadCalls();
+    const contact = await findContactByPhone(to);
+    const calls = await loadCalls();
     calls.unshift({
       sid: call.sid,
       to,
@@ -169,7 +203,7 @@ app.post('/api/call', async (req, res) => {
       recordingUrl: null,
       transcript: null,
     });
-    saveCalls(calls);
+    await saveCalls(calls);
 
     res.json({ ok: true, sid: call.sid });
   } catch (err) {
@@ -199,16 +233,15 @@ app.post('/recording-status', async (req, res) => {
   res.sendStatus(200);
 
   try {
-    // Twilio's built-in transcription (async)
     const transcription = await client.recordings(RecordingSid).transcriptions.create();
     console.log('Transcription requested:', transcription.sid);
 
-    const calls = loadCalls();
+    const calls = await loadCalls();
     const idx = calls.findIndex((c) => c.sid === CallSid);
     if (idx !== -1) {
       calls[idx].recordingUrl = `${RecordingUrl}.mp3`;
       calls[idx].status = 'transcribing';
-      saveCalls(calls);
+      await saveCalls(calls);
     }
   } catch (err) {
     console.error('Transcription request failed:', err.message);
@@ -216,45 +249,41 @@ app.post('/recording-status', async (req, res) => {
 });
 
 // ---- 4. Transcription complete webhook ----
-app.post('/transcription-status', (req, res) => {
+app.post('/transcription-status', async (req, res) => {
   res.sendStatus(200);
   const { TranscriptionText, CallSid, TranscriptionStatus } = req.body;
 
-  const calls = loadCalls();
-  // Twilio doesn't always pass CallSid here reliably across all setups,
-  // so also match on most recent "transcribing" entry as a fallback.
+  const calls = await loadCalls();
   let idx = calls.findIndex((c) => c.sid === CallSid);
   if (idx === -1) idx = calls.findIndex((c) => c.status === 'transcribing');
 
   if (idx !== -1) {
     calls[idx].transcript = TranscriptionText || '(transcription failed)';
     calls[idx].status = TranscriptionStatus === 'completed' ? 'done' : 'transcription-failed';
-    saveCalls(calls);
+    await saveCalls(calls);
   }
 });
 
 // ---- 5. Call status updates (e.g. completed/no-answer) ----
-app.post('/status', (req, res) => {
+app.post('/status', async (req, res) => {
   res.sendStatus(200);
   const { CallSid, CallStatus } = req.body;
-  const calls = loadCalls();
+  const calls = await loadCalls();
   const idx = calls.findIndex((c) => c.sid === CallSid);
   if (idx !== -1 && calls[idx].status === 'calling') {
     calls[idx].status = CallStatus;
-    saveCalls(calls);
+    await saveCalls(calls);
   }
 });
 
 // ---- 6. List calls for the frontend ----
-app.get('/api/calls', (req, res) => {
-  res.json(loadCalls());
+app.get('/api/calls', async (req, res) => {
+  try { res.json(await loadCalls()); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ---- 7. Manual refresh: poll Twilio for a transcript if the webhook didn't fire ----
-// Twilio's transcription webhook setup is fiddly for a small app, so this endpoint
-// lets the frontend check directly — the most reliable path for single-user use.
 app.post('/api/calls/:sid/refresh', async (req, res) => {
-  const calls = loadCalls();
+  const calls = await loadCalls();
   const idx = calls.findIndex((c) => c.sid === req.params.sid);
   if (idx === -1) return res.status(404).json({ error: 'not found' });
 
@@ -267,7 +296,7 @@ app.post('/api/calls/:sid/refresh', async (req, res) => {
       const full = await client.transcriptions(transcriptions[0].sid).fetch();
       calls[idx].transcript = full.transcriptionText;
       calls[idx].status = 'done';
-      saveCalls(calls);
+      await saveCalls(calls);
     }
   } catch (err) {
     console.error('Refresh failed:', err.message);
@@ -278,7 +307,6 @@ app.post('/api/calls/:sid/refresh', async (req, res) => {
 
 // ==================== TEXT MESSAGES (Twilio SMS) ====================
 
-// ---- Send a text ----
 app.post('/api/sms/send', async (req, res) => {
   const { to: rawTo, body, contactId } = req.body;
   if (!rawTo || !body) return res.status(400).json({ error: 'Missing "to" or "body"' });
@@ -286,9 +314,10 @@ app.post('/api/sms/send', async (req, res) => {
 
   try {
     const msg = await client.messages.create({ to, from: TWILIO_PHONE_NUMBER, body });
-    const contact = contactId ? loadContacts().find((c) => c.id === contactId) : findContactByPhone(to);
+    const contacts = await loadContacts();
+    const contact = contactId ? contacts.find((c) => c.id === contactId) : await findContactByPhone(to);
 
-    const messages = loadMessages();
+    const messages = await loadMessages();
     messages.unshift({
       sid: msg.sid,
       direction: 'outbound',
@@ -298,7 +327,7 @@ app.post('/api/sms/send', async (req, res) => {
       contactId: contact ? contact.id : null,
       at: new Date().toISOString(),
     });
-    saveMessages(messages);
+    await saveMessages(messages);
     res.json({ ok: true, sid: msg.sid });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -306,11 +335,11 @@ app.post('/api/sms/send', async (req, res) => {
 });
 
 // ---- Receive a text (Twilio webhook — set this URL on your Twilio number's "A Message Comes In") ----
-app.post('/sms-incoming', (req, res) => {
+app.post('/sms-incoming', async (req, res) => {
   const { From, Body, MessageSid } = req.body;
-  const contact = findContactByPhone(From);
+  const contact = await findContactByPhone(From);
 
-  const messages = loadMessages();
+  const messages = await loadMessages();
   messages.unshift({
     sid: MessageSid,
     direction: 'inbound',
@@ -320,13 +349,47 @@ app.post('/sms-incoming', (req, res) => {
     contactId: contact ? contact.id : null,
     at: new Date().toISOString(),
   });
-  saveMessages(messages);
+  await saveMessages(messages);
 
   const twiml = new MessagingResponse();
   res.type('text/xml').send(twiml.toString()); // empty response = no auto-reply
 });
 
-app.get('/api/sms', (req, res) => res.json(loadMessages()));
+app.get('/api/sms', async (req, res) => {
+  try { res.json(await loadMessages()); } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ---- Mass text: send the same message to every contact with a phone number ----
+app.post('/api/sms/broadcast', async (req, res) => {
+  const { body } = req.body;
+  if (!body) return res.status(400).json({ error: 'Missing message body' });
+
+  const contacts = (await loadContacts()).filter((c) => c.phone);
+  const messages = await loadMessages();
+  let sent = 0, failed = [];
+
+  for (const contact of contacts) {
+    const to = toE164NZ(contact.phone);
+    try {
+      const msg = await client.messages.create({ to, from: TWILIO_PHONE_NUMBER, body });
+      messages.unshift({
+        sid: msg.sid,
+        direction: 'outbound',
+        to,
+        from: TWILIO_PHONE_NUMBER,
+        body,
+        contactId: contact.id,
+        at: new Date().toISOString(),
+      });
+      sent++;
+    } catch (err) {
+      failed.push({ name: contact.name, phone: contact.phone, error: err.message });
+    }
+  }
+
+  await saveMessages(messages);
+  res.json({ ok: true, sent, failed });
+});
 
 // ==================== EMAIL (Microsoft Graph / Outlook) ====================
 // Full-inbox sync requires you to sign in once via Microsoft so the app can read
@@ -337,7 +400,6 @@ const msal = require('@azure/msal-node');
 const { Client } = require('@microsoft/microsoft-graph-client');
 
 const MS_SCOPES = ['Mail.Read', 'Mail.Send', 'offline_access', 'User.Read'];
-const TOKEN_PATH = path.join(__dirname, 'ms-token.json');
 
 // Built lazily — only when an email route is actually hit — so the app can run
 // fine with just Twilio configured, before Outlook is set up.
@@ -377,7 +439,7 @@ app.get('/auth/microsoft/callback', async (req, res) => {
       scopes: MS_SCOPES,
       redirectUri: `${PUBLIC_BASE_URL}/auth/microsoft/callback`,
     });
-    saveJSON(TOKEN_PATH, tokenResponse);
+    await saveMsToken(tokenResponse);
     res.send('Microsoft 365 connected — you can close this tab and go back to the app.');
   } catch (err) {
     res.status(500).send('Auth failed: ' + err.message);
@@ -385,7 +447,7 @@ app.get('/auth/microsoft/callback', async (req, res) => {
 });
 
 async function getGraphClient() {
-  const cached = loadJSON(TOKEN_PATH);
+  const cached = await loadMsToken();
   if (!cached || !cached.account) throw new Error('Not connected to Microsoft 365 — visit /auth/microsoft first');
 
   const result = await getMsalClient().acquireTokenSilent({
@@ -410,8 +472,9 @@ app.post('/api/email/send', async (req, res) => {
       },
     });
 
-    const contact = contactId ? loadContacts().find((c) => c.id === contactId) : findContactByEmail(to);
-    const emails = loadEmails();
+    const contacts = await loadContacts();
+    const contact = contactId ? contacts.find((c) => c.id === contactId) : await findContactByEmail(to);
+    const emails = await loadEmails();
     emails.unshift({
       direction: 'outbound',
       to,
@@ -420,7 +483,7 @@ app.post('/api/email/send', async (req, res) => {
       contactId: contact ? contact.id : null,
       at: new Date().toISOString(),
     });
-    saveEmails(emails);
+    await saveEmails(emails);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -428,13 +491,10 @@ app.post('/api/email/send', async (req, res) => {
 });
 
 // ---- Sync: pull recent inbox + sent mail, match to contacts by email address ----
-// Call this periodically (e.g. a cron hitting this endpoint every few minutes) to
-// keep contact folders up to date with real replies from your inbox.
 app.post('/api/email/sync', async (req, res) => {
   try {
     const graph = await getGraphClient();
-    const contacts = loadContacts();
-    const existing = loadEmails();
+    const existing = await loadEmails();
     const existingIds = new Set(existing.map((e) => e.graphId));
 
     const [inbox, sent] = await Promise.all([
@@ -446,7 +506,7 @@ app.post('/api/email/sync', async (req, res) => {
     for (const m of inbox.value) {
       if (existingIds.has(m.id)) continue;
       const fromAddr = m.from?.emailAddress?.address;
-      const contact = findContactByEmail(fromAddr);
+      const contact = await findContactByEmail(fromAddr);
       existing.unshift({
         graphId: m.id,
         direction: 'inbound',
@@ -461,7 +521,7 @@ app.post('/api/email/sync', async (req, res) => {
     for (const m of sent.value) {
       if (existingIds.has(m.id)) continue;
       const toAddr = m.toRecipients?.[0]?.emailAddress?.address;
-      const contact = findContactByEmail(toAddr);
+      const contact = await findContactByEmail(toAddr);
       existing.unshift({
         graphId: m.id,
         direction: 'outbound',
@@ -474,13 +534,56 @@ app.post('/api/email/sync', async (req, res) => {
       added++;
     }
 
-    saveEmails(existing);
+    await saveEmails(existing);
     res.json({ ok: true, added });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/email', (req, res) => res.json(loadEmails()));
+app.get('/api/email', async (req, res) => {
+  try { res.json(await loadEmails()); } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ---- Mass email: send the same message to every contact with an email address ----
+app.post('/api/email/broadcast', async (req, res) => {
+  const { subject, body } = req.body;
+  if (!body) return res.status(400).json({ error: 'Missing message body' });
+
+  try {
+    const graph = await getGraphClient();
+    const contacts = (await loadContacts()).filter((c) => c.email);
+    const emails = await loadEmails();
+    let sent = 0, failed = [];
+
+    for (const contact of contacts) {
+      try {
+        await graph.api('/me/sendMail').post({
+          message: {
+            subject,
+            body: { contentType: 'Text', content: body },
+            toRecipients: [{ emailAddress: { address: contact.email } }],
+          },
+        });
+        emails.unshift({
+          direction: 'outbound',
+          to: contact.email,
+          subject,
+          body,
+          contactId: contact.id,
+          at: new Date().toISOString(),
+        });
+        sent++;
+      } catch (err) {
+        failed.push({ name: contact.name, email: contact.email, error: err.message });
+      }
+    }
+
+    await saveEmails(emails);
+    res.json({ ok: true, sent, failed });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.listen(PORT, () => console.log(`Call app listening on port ${PORT}`));
