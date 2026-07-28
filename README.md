@@ -20,13 +20,37 @@ history of everything that's happened with them, newest first.
   also syncs your real inbox/sent folder so replies and emails you sent
   from Outlook directly show up in the same folder, matched by email address.
 
-## 1. Set up Twilio (~10 minutes)
+## 1. Set up storage (Upstash Redis — free)
+
+Render's free hosting doesn't keep saved files between restarts, so contacts,
+calls, texts, and emails are stored in a free cloud database instead
+(Upstash Redis — a simple key-value store with a generous free tier).
+
+1. Go to [upstash.com](https://upstash.com), sign up (free, no card needed)
+2. Tap **Create Database** — name it anything, pick a region close to you
+3. On the database page, find **REST API** section — copy the **UPSTASH_REDIS_REST_URL** and **UPSTASH_REDIS_REST_TOKEN** values
+
+You'll paste these into Render's environment variables in step 5.
+
+## 2. Set up transcription (OpenAI Whisper)
+
+Twilio's own call-transcription feature has been discontinued, so recordings
+are transcribed using OpenAI's Whisper model instead — a few cents per call.
+
+1. Go to [platform.openai.com](https://platform.openai.com), sign up
+2. Add a small amount of billing credit (Settings → Billing) — Whisper costs
+   about US$0.006/minute, so even heavy use is a few dollars a month
+3. Go to **API keys** → **Create new secret key** → copy it
+
+You'll add this as `OPENAI_API_KEY` in step 6.
+
+## 3. Set up Twilio (~10 minutes)
 
 1. Sign up at [twilio.com](https://www.twilio.com/try-twilio) (free trial gives you credit).
 2. Buy a phone number: Console → Phone Numbers → Buy a Number (pick one with **Voice** capability, ideally a NZ number or one that can dial NZ numbers affordably).
 3. Grab your **Account SID** and **Auth Token** from the Console dashboard.
 
-## 2. Deploy the app
+## 4. Deploy the app
 
 You need the app reachable at a public URL so Twilio can call back into it
 (for the recording/transcription webhooks). Easiest options:
@@ -35,15 +59,19 @@ You need the app reachable at a public URL so Twilio can call back into it
 - **Fly.io** — similar, a bit more setup.
 - **Local + ngrok** (for testing) — run the app on your laptop, then run `ngrok http 3000` to get a temporary public URL.
 
-## 3. Set up texting
+## 5. Set up texting
 
-On your Twilio number's config page (Console → Phone Numbers → your number):
-- Under **"A Message Comes In"**, set the webhook to `PUBLIC_BASE_URL/sms-incoming`.
+New Zealand local numbers can't send SMS through Twilio at all — this is a
+carrier restriction, not something Twilio or this app can work around. So
+texting needs a second Twilio number:
 
-That's it — sending texts uses your existing Twilio credentials, and this
-webhook logs replies into the right contact folder automatically.
+1. Buy a second number — Twilio Console → **Phone Numbers** → **Buy a Number**
+   → change country to something like **United States** or **United Kingdom**
+   → make sure **SMS** is checked in the capability filters
+2. On that new number's config page (Console → Phone Numbers → the SMS-capable number), under **"A Message Comes In"**, set the webhook to `PUBLIC_BASE_URL/sms-incoming`
+3. Add this number as `TWILIO_SMS_NUMBER` in your environment variables (step 6) — your original NZ number stays as `TWILIO_PHONE_NUMBER` and keeps handling calls
 
-## 4. Set up email (Microsoft 365 / Outlook)
+## 6. Set up email (Microsoft 365 / Outlook)
 
 Full inbox sync needs your app registered with Microsoft so it can read
 your mail via Graph API. One-time setup:
@@ -60,19 +88,21 @@ Once the app is running, visit `PUBLIC_BASE_URL/auth/microsoft` once in
 your browser and sign in with your Outlook account — the app stores your
 access token locally and refreshes it automatically after that.
 
-## 5. Configure
+## 7. Configure
 
 ```
 cp .env.example .env
 ```
 
 Fill in `.env` with:
+- `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` — from Upstash (step 1)
+- `OPENAI_API_KEY` — from OpenAI (step 2)
 - `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` — from the Twilio console
 - `TWILIO_PHONE_NUMBER` — the number you bought
 - `MY_PHONE_NUMBER` — your actual mobile number, in `+64...` format
-- `PUBLIC_BASE_URL` — the public URL from step 2 (no trailing slash)
+- `PUBLIC_BASE_URL` — the public URL from step 4 (no trailing slash)
 
-## 6. Install & run
+## 8. Install & run
 
 ```
 npm install

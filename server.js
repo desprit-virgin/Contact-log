@@ -13,13 +13,16 @@ require('dotenv').config();
 const {
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
-  TWILIO_PHONE_NUMBER, // the Twilio number that will do the calling
-  MY_PHONE_NUMBER,     // your real mobile number — Twilio calls you first, then bridges
-  PUBLIC_BASE_URL,     // e.g. https://your-app.onrender.com
+  TWILIO_PHONE_NUMBER,     // the Twilio number that will do the calling
+  TWILIO_SMS_NUMBER,       // a separate SMS-capable number (NZ local numbers can't text) — falls back to TWILIO_PHONE_NUMBER if not set
+  MY_PHONE_NUMBER,         // your real mobile number — Twilio calls you first, then bridges
+  PUBLIC_BASE_URL,         // e.g. https://your-app.onrender.com
   UPSTASH_REDIS_REST_URL,
   UPSTASH_REDIS_REST_TOKEN,
   PORT = 3000,
 } = process.env;
+
+const SMS_FROM_NUMBER = TWILIO_SMS_NUMBER || TWILIO_PHONE_NUMBER;
 
 const client = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 const VoiceResponse = twilio.twiml.VoiceResponse;
@@ -227,40 +230,62 @@ app.post('/twiml/bridge', (req, res) => {
   res.type('text/xml').send(twiml.toString());
 });
 
-// ---- 3. Recording finished -> kick off transcription ----
+// ---- Transcribe a recording with OpenAI Whisper ----
+// Twilio's own transcription feature was discontinued from the SDK, so we
+// download the recorded audio ourselves and send it to Whisper instead.
+async function transcribeRecording(recordingUrl) {
+  const audioRes = await fetch(`${recordingUrl}.mp3`, {
+    headers: {
+      Authorization: 'Basic ' + Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64'),
+    },
+  });
+  if (!audioRes.ok) throw new Error(`Failed to download recording: ${audioRes.status}`);
+  const audioBuffer = await audioRes.arrayBuffer();
+
+  const form = new FormData();
+  form.append('file', new Blob([audioBuffer], { type: 'audio/mpeg' }), 'call.mp3');
+  form.append('model', 'whisper-1');
+
+  const whisperRes = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+    body: form,
+  });
+  const data = await whisperRes.json();
+  if (!whisperRes.ok) throw new Error(data.error?.message || 'Whisper request failed');
+  return data.text;
+}
+
+// ---- 3. Recording finished -> transcribe it ----
 app.post('/recording-status', async (req, res) => {
-  const { RecordingSid, RecordingUrl, CallSid } = req.body;
+  const { RecordingUrl, CallSid } = req.body;
   res.sendStatus(200);
-
-  try {
-    const transcription = await client.recordings(RecordingSid).transcriptions.create();
-    console.log('Transcription requested:', transcription.sid);
-
-    const calls = await loadCalls();
-    const idx = calls.findIndex((c) => c.sid === CallSid);
-    if (idx !== -1) {
-      calls[idx].recordingUrl = `${RecordingUrl}.mp3`;
-      calls[idx].status = 'transcribing';
-      await saveCalls(calls);
-    }
-  } catch (err) {
-    console.error('Transcription request failed:', err.message);
-  }
-});
-
-// ---- 4. Transcription complete webhook ----
-app.post('/transcription-status', async (req, res) => {
-  res.sendStatus(200);
-  const { TranscriptionText, CallSid, TranscriptionStatus } = req.body;
 
   const calls = await loadCalls();
-  let idx = calls.findIndex((c) => c.sid === CallSid);
-  if (idx === -1) idx = calls.findIndex((c) => c.status === 'transcribing');
+  const idx = calls.findIndex((c) => c.sid === CallSid);
+  if (idx === -1) return;
 
-  if (idx !== -1) {
-    calls[idx].transcript = TranscriptionText || '(transcription failed)';
-    calls[idx].status = TranscriptionStatus === 'completed' ? 'done' : 'transcription-failed';
-    await saveCalls(calls);
+  calls[idx].recordingUrl = `${RecordingUrl}.mp3`;
+  calls[idx].status = 'transcribing';
+  await saveCalls(calls);
+
+  try {
+    const text = await transcribeRecording(RecordingUrl);
+    const freshCalls = await loadCalls();
+    const freshIdx = freshCalls.findIndex((c) => c.sid === CallSid);
+    if (freshIdx !== -1) {
+      freshCalls[freshIdx].transcript = text;
+      freshCalls[freshIdx].status = 'done';
+      await saveCalls(freshCalls);
+    }
+  } catch (err) {
+    console.error('Transcription failed:', err.message);
+    const freshCalls = await loadCalls();
+    const freshIdx = freshCalls.findIndex((c) => c.sid === CallSid);
+    if (freshIdx !== -1) {
+      freshCalls[freshIdx].status = 'transcription-failed';
+      await saveCalls(freshCalls);
+    }
   }
 });
 
@@ -281,23 +306,20 @@ app.get('/api/calls', async (req, res) => {
   try { res.json(await loadCalls()); } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ---- 7. Manual refresh: poll Twilio for a transcript if the webhook didn't fire ----
+// ---- 7. Manual retry: re-run Whisper on a call's recording if it failed or got stuck ----
 app.post('/api/calls/:sid/refresh', async (req, res) => {
   const calls = await loadCalls();
   const idx = calls.findIndex((c) => c.sid === req.params.sid);
   if (idx === -1) return res.status(404).json({ error: 'not found' });
 
-  try {
-    const recordings = await client.recordings.list({ callSid: req.params.sid, limit: 1 });
-    if (!recordings.length) return res.json(calls[idx]);
+  if (!calls[idx].recordingUrl) return res.json(calls[idx]);
 
-    const transcriptions = await client.recordings(recordings[0].sid).transcriptions.list();
-    if (transcriptions.length && transcriptions[0].status === 'completed') {
-      const full = await client.transcriptions(transcriptions[0].sid).fetch();
-      calls[idx].transcript = full.transcriptionText;
-      calls[idx].status = 'done';
-      await saveCalls(calls);
-    }
+  try {
+    const rawUrl = calls[idx].recordingUrl.replace(/\.mp3$/, '');
+    const text = await transcribeRecording(rawUrl);
+    calls[idx].transcript = text;
+    calls[idx].status = 'done';
+    await saveCalls(calls);
   } catch (err) {
     console.error('Refresh failed:', err.message);
   }
@@ -313,7 +335,7 @@ app.post('/api/sms/send', async (req, res) => {
   const to = toE164NZ(rawTo);
 
   try {
-    const msg = await client.messages.create({ to, from: TWILIO_PHONE_NUMBER, body });
+    const msg = await client.messages.create({ to, from: SMS_FROM_NUMBER, body });
     const contacts = await loadContacts();
     const contact = contactId ? contacts.find((c) => c.id === contactId) : await findContactByPhone(to);
 
@@ -322,7 +344,7 @@ app.post('/api/sms/send', async (req, res) => {
       sid: msg.sid,
       direction: 'outbound',
       to,
-      from: TWILIO_PHONE_NUMBER,
+      from: SMS_FROM_NUMBER,
       body,
       contactId: contact ? contact.id : null,
       at: new Date().toISOString(),
@@ -343,7 +365,7 @@ app.post('/sms-incoming', async (req, res) => {
   messages.unshift({
     sid: MessageSid,
     direction: 'inbound',
-    to: TWILIO_PHONE_NUMBER,
+    to: SMS_FROM_NUMBER,
     from: From,
     body: Body,
     contactId: contact ? contact.id : null,
@@ -371,12 +393,12 @@ app.post('/api/sms/broadcast', async (req, res) => {
   for (const contact of contacts) {
     const to = toE164NZ(contact.phone);
     try {
-      const msg = await client.messages.create({ to, from: TWILIO_PHONE_NUMBER, body });
+      const msg = await client.messages.create({ to, from: SMS_FROM_NUMBER, body });
       messages.unshift({
         sid: msg.sid,
         direction: 'outbound',
         to,
-        from: TWILIO_PHONE_NUMBER,
+        from: SMS_FROM_NUMBER,
         body,
         contactId: contact.id,
         at: new Date().toISOString(),
