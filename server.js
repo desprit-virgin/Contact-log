@@ -230,6 +230,42 @@ app.post('/twiml/bridge', (req, res) => {
   res.type('text/xml').send(twiml.toString());
 });
 
+// ---- Incoming calls: someone calls your Twilio number directly ----
+// Twilio hits this the moment the call comes in. We log it, then forward
+// it to your real phone, recording the whole thing the same way as outbound calls.
+app.post('/twiml/incoming', async (req, res) => {
+  const { CallSid, From } = req.body;
+
+  try {
+    const contact = await findContactByPhone(From);
+    const calls = await loadCalls();
+    calls.unshift({
+      sid: CallSid,
+      to: From, // the person who called you
+      contactId: contact ? contact.id : null,
+      label: '',
+      startedAt: new Date().toISOString(),
+      status: 'calling',
+      recordingUrl: null,
+      transcript: null,
+      direction: 'inbound',
+    });
+    await saveCalls(calls);
+  } catch (err) {
+    console.error('Failed to log incoming call:', err.message);
+  }
+
+  const twiml = new VoiceResponse();
+  const dial = twiml.dial({
+    record: 'record-from-answer-dual',
+    recordingStatusCallback: `${PUBLIC_BASE_URL}/recording-status`,
+    recordingStatusCallbackEvent: ['completed'],
+  });
+  dial.number(MY_PHONE_NUMBER);
+
+  res.type('text/xml').send(twiml.toString());
+});
+
 // ---- Transcribe a recording with OpenAI Whisper ----
 // Twilio's own transcription feature was discontinued from the SDK, so we
 // download the recorded audio ourselves and send it to Whisper instead.
@@ -607,5 +643,9 @@ app.post('/api/email/broadcast', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// Simple health check — used by an external uptime pinger to keep the free
+// Render instance from spinning down between calls.
+app.get('/health', (req, res) => res.send('ok'));
 
 app.listen(PORT, () => console.log(`Call app listening on port ${PORT}`));
