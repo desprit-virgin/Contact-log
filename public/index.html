@@ -86,8 +86,24 @@
 <header>
   <button id="backBtn">&larr; Contacts</button>
   <h1 id="pageTitle">Contact Log</h1>
-  <span></span>
+  <button id="editContactBtn" style="display:none; background:none; border:none; color:var(--moss-dark); font-size:14px; font-weight:600; cursor:pointer; padding:0;">Edit</button>
 </header>
+
+<!-- Edit contact modal -->
+<div id="editModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.3); z-index:50; align-items:center; justify-content:center;">
+  <div style="background:white; border-radius:14px; padding:20px; width:90%; max-width:420px;">
+    <p class="section-label" style="margin-top:0;">Edit contact</p>
+    <label>Name</label>
+    <input id="editName" type="text" />
+    <label>Phone</label>
+    <input id="editPhone" type="tel" />
+    <label>Email</label>
+    <input id="editEmail" type="email" />
+    <button class="primary" id="saveEditBtn">Save</button>
+    <button style="width:100%; margin-top:8px; padding:10px; background:none; border:1px solid var(--line); border-radius:10px; color:var(--muted);" id="cancelEditBtn">Cancel</button>
+    <div class="status-msg" id="editStatus"></div>
+  </div>
+</div>
 
 <main>
   <!-- ==== CONTACTS LIST VIEW ==== -->
@@ -186,6 +202,7 @@ function showContactsView() {
   contactsView.style.display = 'block';
   folderView.style.display = 'none';
   backBtn.style.display = 'none';
+  document.getElementById('editContactBtn').style.display = 'none';
   pageTitle.textContent = 'Contact Log';
   loadContacts();
 }
@@ -195,6 +212,7 @@ function showFolderView(contact) {
   contactsView.style.display = 'none';
   folderView.style.display = 'block';
   backBtn.style.display = 'block';
+  document.getElementById('editContactBtn').style.display = 'block';
   pageTitle.textContent = contact.name;
   loadFolder();
 }
@@ -330,6 +348,41 @@ function setTab(active) {
 document.getElementById('tabCall').addEventListener('click', () => setTab('call'));
 document.getElementById('tabText').addEventListener('click', () => setTab('text'));
 document.getElementById('tabEmail').addEventListener('click', () => setTab('email'));
+
+// ---- Edit contact ----
+document.getElementById('editContactBtn').addEventListener('click', () => {
+  document.getElementById('editName').value = currentContact.name || '';
+  document.getElementById('editPhone').value = currentContact.phone || '';
+  document.getElementById('editEmail').value = currentContact.email || '';
+  document.getElementById('editStatus').textContent = '';
+  document.getElementById('editModal').style.display = 'flex';
+});
+
+document.getElementById('cancelEditBtn').addEventListener('click', () => {
+  document.getElementById('editModal').style.display = 'none';
+});
+
+document.getElementById('saveEditBtn').addEventListener('click', async () => {
+  const name = document.getElementById('editName').value.trim();
+  const phone = document.getElementById('editPhone').value.trim();
+  const email = document.getElementById('editEmail').value.trim();
+  const status = document.getElementById('editStatus');
+  if (!name) { status.textContent = 'Name is required.'; return; }
+
+  const res = await fetch('/api/contacts/' + currentContact.id, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, phone, email }),
+  });
+  const updated = await res.json();
+  if (res.ok) {
+    currentContact = updated;
+    document.getElementById('editModal').style.display = 'none';
+    pageTitle.textContent = updated.name;
+    loadFolder();
+  } else {
+    status.textContent = 'Error: ' + updated.error;
+  }
+});
 
 // ---- Call ----
 document.getElementById('callBtn').addEventListener('click', async () => {
