@@ -30,7 +30,7 @@ const MessagingResponse = twilio.twiml.MessagingResponse;
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: '8mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ==================== STORAGE (Upstash Redis) ====================
@@ -65,8 +65,8 @@ const loadMessages = () => loadTable('messages');
 const saveMessages = (d) => saveTable('messages', d);
 const loadEmails = () => loadTable('emails');
 const saveEmails = (d) => saveTable('emails', d);
-const loadMsToken = () => loadTable('ms-token').then((t) => (Array.isArray(t) && t.length === 0 ? null : t));
-const saveMsToken = (d) => saveTable('ms-token', d);
+const loadPhotos = () => loadTable('photos');
+const savePhotos = (d) => saveTable('photos', d);
 
 // Match a phone/email to a saved contact, normalizing loosely
 async function findContactByPhone(phone) {
@@ -131,6 +131,45 @@ app.put('/api/contacts/:id', async (req, res) => {
   }
 });
 
+// ---- Photos: upload a photo to a contact's folder ----
+// Photos are stored as compressed base64 images directly in the same free
+// database as everything else — kept simple since there's no separate
+// file-storage account in this setup.
+app.post('/api/contacts/:id/photos', async (req, res) => {
+  const { dataUrl, filename } = req.body;
+  if (!dataUrl) return res.status(400).json({ error: 'Missing image data' });
+
+  try {
+    const contacts = await loadContacts();
+    const contact = contacts.find((c) => c.id === req.params.id);
+    if (!contact) return res.status(404).json({ error: 'contact not found' });
+
+    const photos = await loadPhotos();
+    const photo = {
+      id: 'p_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+      contactId: contact.id,
+      filename: filename || 'photo.jpg',
+      dataUrl,
+      at: new Date().toISOString(),
+    };
+    photos.unshift(photo);
+    await savePhotos(photos);
+    res.json(photo);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/photos/:id', async (req, res) => {
+  try {
+    const photos = (await loadPhotos()).filter((p) => p.id !== req.params.id);
+    await savePhotos(photos);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ---- Bulk import contacts (e.g. from a franchise list) ----
 app.post('/api/contacts/import', async (req, res) => {
   const incoming = req.body.contacts || [];
@@ -172,6 +211,7 @@ app.get('/api/contacts/:id/folder', async (req, res) => {
     const calls = (await loadCalls()).filter((c) => c.contactId === contact.id);
     const messages = (await loadMessages()).filter((m) => m.contactId === contact.id);
     const emails = (await loadEmails()).filter((e) => e.contactId === contact.id);
+    const photos = (await loadPhotos()).filter((p) => p.contactId === contact.id);
 
     const timeline = [
       ...calls.map((c) => ({ type: 'call', at: c.startedAt, ...c })),
@@ -179,7 +219,7 @@ app.get('/api/contacts/:id/folder', async (req, res) => {
       ...emails.map((e) => ({ type: 'email', at: e.at, ...e })),
     ].sort((a, b) => new Date(b.at) - new Date(a.at));
 
-    res.json({ contact, timeline });
+    res.json({ contact, timeline, photos: photos.sort((a, b) => new Date(b.at) - new Date(a.at)) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -479,6 +519,22 @@ const { Client } = require('@microsoft/microsoft-graph-client');
 
 const MS_SCOPES = ['Mail.Read', 'Mail.Send', 'offline_access', 'User.Read'];
 
+// MSAL normally keeps your login token only in memory, which gets wiped every
+// time Render restarts the app (deploys, free-tier sleep, etc.) — that's why
+// email kept saying "please sign in" again. This plugin saves the real token
+// cache to the same Redis database everything else uses, so it survives restarts.
+const msCachePlugin = {
+  beforeCacheAccess: async (cacheContext) => {
+    const raw = await redis(['GET', 'ms-cache-raw']).catch(() => null);
+    if (raw) cacheContext.tokenCache.deserialize(raw);
+  },
+  afterCacheAccess: async (cacheContext) => {
+    if (cacheContext.cacheHasChanged) {
+      await redis(['SET', 'ms-cache-raw', cacheContext.tokenCache.serialize()]);
+    }
+  },
+};
+
 // Built lazily — only when an email route is actually hit — so the app can run
 // fine with just Twilio configured, before Outlook is set up.
 let msalClient = null;
@@ -493,6 +549,7 @@ function getMsalClient() {
         authority: `https://login.microsoftonline.com/${process.env.MS_TENANT_ID || 'common'}`,
         clientSecret: process.env.MS_CLIENT_SECRET,
       },
+      cache: { cachePlugin: msCachePlugin },
     });
   }
   return msalClient;
@@ -512,12 +569,11 @@ app.get('/auth/microsoft', async (req, res) => {
 
 app.get('/auth/microsoft/callback', async (req, res) => {
   try {
-    const tokenResponse = await getMsalClient().acquireTokenByCode({
+    await getMsalClient().acquireTokenByCode({
       code: req.query.code,
       scopes: MS_SCOPES,
       redirectUri: `${PUBLIC_BASE_URL}/auth/microsoft/callback`,
     });
-    await saveMsToken(tokenResponse);
     res.send('Microsoft 365 connected — you can close this tab and go back to the app.');
   } catch (err) {
     res.status(500).send('Auth failed: ' + err.message);
@@ -525,11 +581,12 @@ app.get('/auth/microsoft/callback', async (req, res) => {
 });
 
 async function getGraphClient() {
-  const cached = await loadMsToken();
-  if (!cached || !cached.account) throw new Error('Not connected to Microsoft 365 — visit /auth/microsoft first');
+  const client = getMsalClient();
+  const accounts = await client.getTokenCache().getAllAccounts();
+  if (!accounts.length) throw new Error('Not connected to Microsoft 365 — visit /auth/microsoft first');
 
-  const result = await getMsalClient().acquireTokenSilent({
-    account: cached.account,
+  const result = await client.acquireTokenSilent({
+    account: accounts[0],
     scopes: MS_SCOPES,
   });
   return Client.init({
