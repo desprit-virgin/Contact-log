@@ -111,6 +111,26 @@ app.delete('/api/contacts/:id', async (req, res) => {
   }
 });
 
+// ---- Edit an existing contact ----
+app.put('/api/contacts/:id', async (req, res) => {
+  const { name, phone, email, location } = req.body;
+  try {
+    const contacts = await loadContacts();
+    const idx = contacts.findIndex((c) => c.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: 'not found' });
+
+    if (name !== undefined) contacts[idx].name = name;
+    if (phone !== undefined) contacts[idx].phone = phone;
+    if (email !== undefined) contacts[idx].email = email;
+    if (location !== undefined) contacts[idx].location = location;
+
+    await saveContacts(contacts);
+    res.json(contacts[idx]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ---- Bulk import contacts (e.g. from a franchise list) ----
 app.post('/api/contacts/import', async (req, res) => {
   const incoming = req.body.contacts || [];
