@@ -122,6 +122,14 @@
 <main>
   <!-- ==== CONTACTS LIST VIEW ==== -->
   <div id="contactsView">
+    <button class="primary" id="goToAddViewBtn" style="margin-bottom:20px;">+ Add contacts</button>
+
+    <p class="section-label">Contacts</p>
+    <div id="contactList"></div>
+  </div>
+
+  <!-- ==== ADD / IMPORT / BROADCAST VIEW ==== -->
+  <div id="addView" style="display:none;">
     <p class="section-label">Add a contact</p>
     <div class="card">
       <label for="newName">Name</label>
@@ -134,9 +142,9 @@
       <div class="status-msg" id="addStatus"></div>
     </div>
 
-    <p class="section-label">Contacts</p>
+    <p class="section-label">Bulk import</p>
     <div class="card" style="padding: 12px 16px;">
-      <label for="importFile" style="margin-bottom:6px;">Bulk import</label>
+      <label for="importFile" style="margin-bottom:6px;">Import from file</label>
       <input id="importFile" type="file" accept="application/json" style="margin-bottom:0;" />
       <button class="primary" id="importBtn" style="margin-top:10px;">Import contacts from file</button>
       <div class="status-msg" id="importStatus"></div>
@@ -163,8 +171,6 @@
       <button class="primary" id="massEmailBtn">Send to all</button>
       <div class="status-msg" id="massEmailStatus"></div>
     </div>
-
-    <div id="contactList"></div>
   </div>
 
   <!-- ==== CONTACT FOLDER VIEW ==== -->
@@ -214,6 +220,7 @@
 let currentContact = null;
 
 const contactsView = document.getElementById('contactsView');
+const addView = document.getElementById('addView');
 const folderView = document.getElementById('folderView');
 const backBtn = document.getElementById('backBtn');
 const pageTitle = document.getElementById('pageTitle');
@@ -223,6 +230,7 @@ backBtn.addEventListener('click', showContactsView);
 function showContactsView() {
   currentContact = null;
   contactsView.style.display = 'block';
+  addView.style.display = 'none';
   folderView.style.display = 'none';
   backBtn.style.display = 'none';
   document.getElementById('editContactBtn').style.display = 'none';
@@ -230,9 +238,21 @@ function showContactsView() {
   loadContacts();
 }
 
+function showAddView() {
+  currentContact = null;
+  contactsView.style.display = 'none';
+  addView.style.display = 'block';
+  folderView.style.display = 'none';
+  backBtn.style.display = 'block';
+  document.getElementById('editContactBtn').style.display = 'none';
+  pageTitle.textContent = 'Add contacts';
+}
+document.getElementById('goToAddViewBtn').addEventListener('click', showAddView);
+
 function showFolderView(contact) {
   currentContact = contact;
   contactsView.style.display = 'none';
+  addView.style.display = 'none';
   folderView.style.display = 'block';
   backBtn.style.display = 'block';
   document.getElementById('editContactBtn').style.display = 'block';
